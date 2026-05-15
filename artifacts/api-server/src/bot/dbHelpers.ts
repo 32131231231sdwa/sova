@@ -162,8 +162,8 @@ export async function getActiveDuel(userId: number) {
         or(eq(owlDuels.challengerId, userId), eq(owlDuels.challengedId, userId)),
         or(
           eq(owlDuels.state, "pending"),
-          eq(owlDuels.state, "type_select"),
-          eq(owlDuels.state, "stake_select"),
+          eq(owlDuels.state, "challenger_type"),
+          eq(owlDuels.state, "challenger_stake"),
           eq(owlDuels.state, "active"),
         ),
       ),
