@@ -32,22 +32,22 @@ export function createBot(): Bot<Context> {
   // Telegram requires ASCII commands for the menu — Russian aliases still work too
   bot.api
     .setMyCommands([
-      { command: "pollo", description: "Профиль твоей совы Pöllö" },
-      { command: "kormit", description: "Покормить Pöllö" },
-      { command: "poit", description: "Напоить Pöllö" },
-      { command: "kupat", description: "Искупать (шанс найти фрагменты)" },
-      { command: "magazin", description: "Магазин скинов" },
-      { command: "kartochki", description: "Коллекция карточек" },
-      { command: "duel", description: "Дуэль (ответь на сообщение игрока)" },
-      { command: "semya", description: "Семья сов" },
-      { command: "vylazka", description: "Семейная вылазка (кд 3 ч)" },
-      { command: "zadaniya", description: "Квесты и задания" },
-      { command: "top", description: "Таблица лидеров" },
-      { command: "stat", description: "Статистика игрока (ответь на сообщение)" },
-      { command: "pereimenovat", description: "Переименовать сову" },
-      { command: "semyaimya", description: "Переименовать семью" },
-      { command: "rasstat", description: "Разорвать семейный союз" },
-      { command: "pomosh", description: "Справка по командам" },
+      { command: "profile", description: "🦉 Your Pöllö owl profile" },
+      { command: "feed", description: "🍗 Feed your Pöllö" },
+      { command: "water", description: "💧 Give water to your Pöllö" },
+      { command: "bathe", description: "🛁 Bathe Pöllö (chance to find feathers)" },
+      { command: "shop", description: "🏪 Skin shop — buy with feather fragments" },
+      { command: "cards", description: "🃏 Your card collection" },
+      { command: "duel", description: "⚔️ Challenge someone (reply to their message)" },
+      { command: "family", description: "👨‍👩‍👧 Owl family — create or view union" },
+      { command: "raid", description: "🌿 Family raid — steal fragments (3h cooldown)" },
+      { command: "quests", description: "📜 Quests & level-up tasks" },
+      { command: "top", description: "🏆 Leaderboards — XP, feathers, level" },
+      { command: "stats", description: "👁 View another player (reply to their message)" },
+      { command: "rename", description: "✏️ Rename your owl" },
+      { command: "familyname", description: "✏️ Rename your family" },
+      { command: "divorce", description: "💔 Break the family union" },
+      { command: "help", description: "❓ Full command guide" },
     ])
     .then(() => logger.info("Bot commands set"))
     .catch((err) => logger.error({ err }, "Failed to set bot commands"));

@@ -26,7 +26,7 @@ const HEIST_COOLDOWN_MS = 3 * 60 * 60 * 1000;
 const HEIST_SUCCESS_CHANCE = 0.3;
 
 export function registerFamilyHandlers(bot: Bot<Context>) {
-  bot.command(["семья", "semya"], async (ctx) => {
+  bot.command(["семья", "semya", "family"], async (ctx) => {
     const mention = ctx.message?.reply_to_message?.from;
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const existingFamily = await getFamily(ctx.from!.id);
@@ -177,7 +177,7 @@ export function registerFamilyHandlers(bot: Bot<Context>) {
     await ctx.editMessageText(`💔 Предложение союза отклонено.`);
   });
 
-  bot.command(["расстаться", "rasstat"], async (ctx) => {
+  bot.command(["расстаться", "rasstat", "divorce"], async (ctx) => {
     const family = await getFamily(ctx.from!.id);
     if (!family) {
       await ctx.reply(`🦉 Ты не состоишь в семье!`);
@@ -228,7 +228,7 @@ export function registerFamilyHandlers(bot: Bot<Context>) {
     await ctx.deleteMessage().catch(() => {});
   });
 
-  bot.command(["вылазка", "vylazka"], async (ctx) => {
+  bot.command(["вылазка", "vylazka", "raid"], async (ctx) => {
     const family = await getFamily(ctx.from!.id);
     if (!family) {
       await ctx.reply(`🦉 Ты не состоишь в семье! Используй /семья для создания союза.`);
@@ -347,7 +347,7 @@ export function registerFamilyHandlers(bot: Bot<Context>) {
     }
   });
 
-  bot.command(["семяимя", "semyaimya"], async (ctx) => {
+  bot.command(["семяимя", "semyaimya", "familyname"], async (ctx) => {
     const args = ctx.message?.text?.split(" ").slice(1).join(" ").trim();
     if (!args) {
       await ctx.reply(

@@ -47,7 +47,7 @@ export function registerCommands(bot: Bot<Context>) {
     );
   });
 
-  bot.command(["полло", "pollo", "profile", "pfollo", "pöllö"], async (ctx) => {
+  bot.command(["полло", "pollo", "profile", "pfollo", "pöllö", "pollo"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const family = await getFamily(ctx.from!.id);
     const isGroup = ctx.chat?.type !== "private";
@@ -55,7 +55,7 @@ export function registerCommands(bot: Bot<Context>) {
     await ctx.reply(profileText, { parse_mode: "HTML" });
   });
 
-  bot.command(["кормить", "kormit"], async (ctx) => {
+  bot.command(["кормить", "kormit", "feed"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const lastFed = new Date(user.lastFedAt).getTime();
     const now = Date.now();
@@ -99,7 +99,7 @@ export function registerCommands(bot: Bot<Context>) {
     );
   });
 
-  bot.command(["поить", "poit"], async (ctx) => {
+  bot.command(["поить", "poit", "water"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const lastWatered = new Date(user.lastWateredAt).getTime();
     const now = Date.now();
@@ -136,7 +136,7 @@ export function registerCommands(bot: Bot<Context>) {
     );
   });
 
-  bot.command(["купать", "kupat"], async (ctx) => {
+  bot.command(["купать", "kupat", "bathe"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const lastBathed = user.lastBathedAt ? new Date(user.lastBathedAt).getTime() : 0;
     const now = Date.now();
@@ -185,7 +185,7 @@ export function registerCommands(bot: Bot<Context>) {
     }
   });
 
-  bot.command(["карточки", "kartochki"], async (ctx) => {
+  bot.command(["карточки", "kartochki", "cards"], async (ctx) => {
     const cards = await getUserCards(ctx.from!.id);
     if (cards.length === 0) {
       await ctx.reply(
@@ -215,7 +215,7 @@ export function registerCommands(bot: Bot<Context>) {
     await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
   });
 
-  bot.command(["переименовать", "pereimenovat"], async (ctx) => {
+  bot.command(["переименовать", "pereimenovat", "rename"], async (ctx) => {
     const args = ctx.message?.text?.split(" ").slice(1).join(" ").trim();
     if (!args) {
       await ctx.reply(
@@ -235,7 +235,7 @@ export function registerCommands(bot: Bot<Context>) {
     );
   });
 
-  bot.command(["топ", "top"], async (ctx) => {
+  bot.command(["топ", "top"], async (ctx) => {  // "top" already English
     const keyboard = new InlineKeyboard()
       .text("✨ По XP", "top_xp")
       .text("🪶 По фрагментам", "top_feathers")
@@ -248,7 +248,7 @@ export function registerCommands(bot: Bot<Context>) {
     });
   });
 
-  bot.command(["стат", "stat"], async (ctx) => {
+  bot.command(["стат", "stat", "stats"], async (ctx) => {
     const mention = ctx.message?.reply_to_message?.from;
     if (!mention) {
       await ctx.reply(

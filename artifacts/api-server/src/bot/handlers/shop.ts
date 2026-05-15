@@ -5,7 +5,7 @@ import { esc, getSkin } from "../format.js";
 import { SKINS } from "../data.js";
 
 export function registerShopHandlers(bot: Bot<Context>) {
-  bot.command(["магазин", "magazin"], async (ctx) => {
+  bot.command(["магазин", "magazin", "shop"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
     const lines: string[] = [
       `🏪 <b>Магазин скинов Pöllö</b>\n`,

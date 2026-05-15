@@ -5,7 +5,7 @@ import { esc, getLevelXP } from "../format.js";
 import { QUESTS } from "../data.js";
 
 export function registerQuestHandlers(bot: Bot<Context>) {
-  bot.command(["задания", "zadaniya"], async (ctx) => {
+  bot.command(["задания", "zadaniya", "quests"], async (ctx) => {
     const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
 
     if (user.level < 5) {

@@ -129,7 +129,7 @@ function battleKeyboard(duelId: number): InlineKeyboard {
 }
 
 export function registerDuelHandlers(bot: Bot<Context>) {
-  bot.command(["дуэль", "duel"], async (ctx) => {
+  bot.command(["дуэль", "duel"], async (ctx) => {  // "duel" already English
     const mention = ctx.message?.reply_to_message?.from;
     if (!mention) {
       await ctx.reply(
