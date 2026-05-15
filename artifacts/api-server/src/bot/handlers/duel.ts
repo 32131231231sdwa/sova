@@ -187,18 +187,42 @@ export function registerDuelHandlers(bot: Bot<Context>) {
 
   // /duel — step 1: challenger picks type
   bot.command(["дуэль", "duel"], async (ctx) => {
-    // Resolve opponent: reply or @mention
-    let mention = ctx.message?.reply_to_message?.from;
+    // Resolve opponent: reply OR @mention OR text_mention
+    const replyMsg = ctx.message?.reply_to_message;
+    let mention = replyMsg?.from ?? null;
+
+    // If replied to a message but from is missing (anonymous admin / channel post),
+    // try forward_origin for any user info
+    if (!mention && replyMsg) {
+      const fo = (replyMsg as any).forward_origin;
+      if (fo?.sender_user) mention = fo.sender_user;
+    }
 
     if (!mention) {
       const entities = ctx.message?.entities ?? [];
       const text = ctx.message?.text ?? "";
       for (const entity of entities) {
         if (entity.type === "mention") {
+          // entity.offset points to '@', length includes '@'
           const username = text.slice(entity.offset + 1, entity.offset + entity.length);
-          const [found] = await db.select().from(owlUsers).where(eq(owlUsers.username, username)).limit(1);
-          if (found) {
-            mention = { id: found.telegramId, username: found.username ?? undefined, first_name: found.owlName, is_bot: false } as any;
+          // Case-insensitive lookup
+          const [found] = await db
+            .select()
+            .from(owlUsers)
+            .where(eq(owlUsers.username, username.toLowerCase()))
+            .limit(1);
+          const foundAlt = found ?? (await db
+            .select()
+            .from(owlUsers)
+            .where(eq(owlUsers.username, username))
+            .limit(1))[0];
+          if (foundAlt) {
+            mention = {
+              id: foundAlt.telegramId,
+              username: foundAlt.username ?? undefined,
+              first_name: foundAlt.owlName,
+              is_bot: false,
+            } as any;
           }
           break;
         }
@@ -210,10 +234,14 @@ export function registerDuelHandlers(bot: Bot<Context>) {
     }
 
     if (!mention) {
+      const inGroup = ctx.chat?.type !== "private";
       await ctx.reply(
         `⚔️ <b>Как бросить вызов:</b>\n\n` +
-        `• Ответь на сообщение игрока командой <code>/duel</code>\n` +
-        `• Или напиши <code>/duel @username</code>`,
+        (inGroup
+          ? `• <b>Ответь</b> на сообщение игрока (удержи → «Ответить»), затем напечатай <code>/duel</code>\n`
+          : ``) +
+        `• Напиши <code>/duel @username</code> — например <code>/duel @sam</code>\n\n` +
+        `<i>Важно: выбор из меню / не сохраняет ответ на сообщение — напечатай команду вручную!</i>`,
         { parse_mode: "HTML" },
       );
       return;
