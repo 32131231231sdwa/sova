@@ -1,44 +1,66 @@
-# [Project name]
+# Взрастить Pöllö
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Telegram-бот-игра про сову Pöllö — кормите, растите и развивайте своего пернатого питомца в группе Telegram.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm --filter @workspace/api-server run dev` — запустить сервер + бот (порт 8080)
+- `pnpm run typecheck` — проверка типов по всем пакетам
+- `pnpm run build` — typecheck + сборка всех пакетов
+- `pnpm --filter @workspace/api-spec run codegen` — перегенерировать API хуки из OpenAPI spec
+- `pnpm --filter @workspace/db run push` — применить изменения схемы БД (только dev)
+- Required env: `DATABASE_URL` — Postgres строка подключения
+- Required secret: `TELEGRAM_BOT_TOKEN` — токен Telegram-бота (от @BotFather)
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
+- Bot: grammy (Telegram bot framework)
+- API: Express 5 (keep-alive сервер)
 - DB: PostgreSQL + Drizzle ORM
 - Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Build: esbuild (CJS bundle) — grammy externalized
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/bot/` — весь код Telegram-бота
+  - `bot.ts` — инициализация и запуск бота
+  - `data.ts` — статические данные (30 карточек, 15 скинов, квесты)
+  - `format.ts` — форматирование сообщений, расчёт голода/жажды
+  - `dbHelpers.ts` — операции с БД
+  - `games.ts` — логика дуэлей (4 режима)
+  - `handlers/` — обработчики команд и колбеков
+- `lib/db/src/schema/owlBot.ts` — схема БД для бота
+- `artifacts/api-server/build.mjs` — esbuild конфиг (grammy в externals!)
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- grammy externalized в esbuild (не бандлится) — иначе ломается `platform.node`
+- Голод/жажда рассчитывается динамически из timestamp (не хранится в готовом виде)
+- Дуэльное состояние хранится в JSONB в БД — позволяет восстанавливать игру после рестарта
+- Express сервер = keep-alive endpoint (`/api/healthz`)
+- Бот работает в long polling режиме (не webhook)
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- 🦉 Сова Pöllö с системой голода/жажды, уровней (1-50), XP
+- 🪶 15 скинов (покупаются за фрагменты, требуют уровень)
+- 🃏 30 карточек с шансом выпадения 1.2% при сообщениях
+- ⚔️ Дуэли: игра перьев, крестики-нолики, кубик, поединок
+- 👨‍👩‍👧 Семейная система (союз 2 сов, совместные вылазки)
+- 📜 Квесты для повышения уровня (с 6-го уровня)
+- 🏆 Таблица лидеров (XP, фрагменты, уровень)
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+_Populate as you build_
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- После изменения схемы БД: `pnpm --filter @workspace/db run push`
+- После изменения `lib/db`: `pnpm run typecheck:libs` для перестройки
+- grammy ДОЛЖЕН быть в externals в `build.mjs` — иначе ошибка `platform.node`
+- `ctx.answerCallbackQuery({ text: "...", show_alert: true })` — не двумя аргументами!
 
 ## Pointers
 
