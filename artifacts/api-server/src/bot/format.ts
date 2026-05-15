@@ -52,10 +52,12 @@ export function getSkin(id: string) {
   return SKINS.find((s) => s.id === id) ?? SKINS[0]!;
 }
 
+const BORDER = "◇ ━━━━━ ◆ ━━━━━ ◇";
+
 export function formatProfile(
   user: OwlUser,
   familyName: string | null,
-  isGroup: boolean,
+  _isGroup: boolean,
 ): string {
   const skin = getSkin(user.owlSkin);
   const hunger = getEffectiveHunger(user);
@@ -66,55 +68,28 @@ export function formatProfile(
       : 0;
   const xpProgress = user.level < 50 ? user.xp - getLevelXP(user.level) : 0;
 
-  if (isGroup) {
-    // Compact group version — no monospace frame that can break
-    return (
-      `${skin.emoji} <b>${esc(user.owlName)}</b> · <b>${esc(skin.name)}</b>\n` +
-      `📊 Уровень <b>${user.level}</b>` +
-      (user.level < 50
-        ? ` · XP: <b>${xpProgress}/${xpForNext}</b>`
-        : " · <b>МАКС</b>") +
-      `\n` +
-      `🍗 Голод: ${hungerEmoji(hunger)} <b>${Math.round(hunger)}%</b>  ` +
-      `💧 Жажда: ${thirstEmoji(thirst)} <b>${Math.round(thirst)}%</b>\n` +
-      `🪶 Фрагменты: <b>${user.feathers}</b>` +
-      (familyName ? `  👨‍👩‍👧 <i>${esc(familyName)}</i>` : "")
-    );
-  }
-
-  // Full DM version with code block frame
-  const line = "─".repeat(22);
   const owlArt = skin.art.trim();
-  const artLines = owlArt.split("\n");
 
-  let profileText =
-    `<b>${skin.emoji} ${esc(user.owlName)}</b>\n` +
-    `<i>${esc(skin.name)}</i>\n\n` +
-    `<code>`;
-
-  profileText += `╔${line}╗\n`;
-  for (const l of artLines) {
-    const padded = l.padEnd(22);
-    profileText += `║ ${padded.substring(0, 20)} ║\n`;
-  }
-  profileText += `╠${line}╣\n`;
-  profileText += `║ 📊 Уровень: ${String(user.level).padEnd(9)} ║\n`;
+  const lines: string[] = [];
+  lines.push(BORDER);
+  lines.push(`${skin.emoji} <b>${esc(user.owlName)}</b>  <i>${esc(skin.name)}</i>`);
+  lines.push(`<code>${owlArt}</code>`);
+  lines.push(`📊 Уровень: <b>${user.level}</b>`);
   if (user.level < 50) {
-    profileText += `║ ✨ XP: ${String(xpProgress + "/" + xpForNext).padEnd(13)} ║\n`;
+    lines.push(`✨ XP: <b>${xpProgress}/${xpForNext}</b>`);
   } else {
-    profileText += `║ ✨ МАКСИМАЛЬНЫЙ УРОВЕНЬ      ║\n`;
+    lines.push(`✨ <b>МАКСИМАЛЬНЫЙ УРОВЕНЬ</b>`);
   }
-  profileText += `║ 🍗 Голод: ${String(Math.round(hunger) + "%").padEnd(11)} ║\n`;
-  profileText += `║ 💧 Жажда: ${String(Math.round(thirst) + "%").padEnd(11)} ║\n`;
-  profileText += `║ 🪶 Фрагменты: ${String(user.feathers).padEnd(7)} ║\n`;
+  lines.push(
+    `🍗 Голод: <b>${Math.round(hunger)}%</b>  💧 Жажда: <b>${Math.round(thirst)}%</b>`,
+  );
+  lines.push(`🪶 Фрагменты: <b>${user.feathers}</b>`);
   if (familyName) {
-    const truncated = familyName.substring(0, 16);
-    profileText += `║ 👨‍👩‍👧 Семья: ${truncated.padEnd(10)} ║\n`;
+    lines.push(`👨‍👩‍👧 Семья: <i>${esc(familyName)}</i>`);
   }
-  profileText += `╚${line}╝`;
-  profileText += `</code>`;
+  lines.push(BORDER);
 
-  return profileText;
+  return lines.join("\n");
 }
 
 export function getLevelXP(level: number): number {

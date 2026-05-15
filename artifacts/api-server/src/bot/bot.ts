@@ -32,22 +32,22 @@ export function createBot(): Bot<Context> {
   // Telegram requires ASCII commands for the menu — Russian aliases still work too
   bot.api
     .setMyCommands([
-      { command: "profile", description: "🦉 Your Pöllö owl profile" },
-      { command: "feed", description: "🍗 Feed your Pöllö" },
-      { command: "water", description: "💧 Give water to your Pöllö" },
-      { command: "bathe", description: "🛁 Bathe Pöllö (chance to find feathers)" },
-      { command: "shop", description: "🏪 Skin shop — buy with feather fragments" },
-      { command: "cards", description: "🃏 Your card collection" },
-      { command: "duel", description: "⚔️ Challenge someone (reply to their message)" },
-      { command: "family", description: "👨‍👩‍👧 Owl family — create or view union" },
-      { command: "raid", description: "🌿 Family raid — steal fragments (3h cooldown)" },
-      { command: "quests", description: "📜 Quests & level-up tasks" },
-      { command: "top", description: "🏆 Leaderboards — XP, feathers, level" },
-      { command: "stats", description: "👁 View another player (reply to their message)" },
-      { command: "rename", description: "✏️ Rename your owl" },
-      { command: "familyname", description: "✏️ Rename your family" },
-      { command: "divorce", description: "💔 Break the family union" },
-      { command: "help", description: "❓ Full command guide" },
+      { command: "profile", description: "Your Pollo owl profile" },
+      { command: "feed", description: "Feed your Pollo" },
+      { command: "water", description: "Give water to your Pollo" },
+      { command: "bathe", description: "Bathe Pollo (chance to find feathers)" },
+      { command: "shop", description: "Skin shop — buy with feather fragments" },
+      { command: "cards", description: "Your card collection" },
+      { command: "duel", description: "Challenge someone (reply to their message)" },
+      { command: "family", description: "Owl family — create or view union" },
+      { command: "raid", description: "Family raid — steal fragments (3h cooldown)" },
+      { command: "quests", description: "Quests and level-up tasks" },
+      { command: "top", description: "Leaderboards — XP, feathers, level" },
+      { command: "stats", description: "View another player (reply to their message)" },
+      { command: "rename", description: "Rename your owl" },
+      { command: "familyname", description: "Rename your family" },
+      { command: "divorce", description: "Break the family union" },
+      { command: "help", description: "Full command guide" },
     ])
     .then(() => logger.info("Bot commands set"))
     .catch((err) => logger.error({ err }, "Failed to set bot commands"));
