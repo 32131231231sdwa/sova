@@ -33,6 +33,8 @@ export const owlUsers = pgTable("owl_users", {
   totalDuelsWon: integer("total_duels_won").notNull().default(0),
   totalDuelsLost: integer("total_duels_lost").notNull().default(0),
   totalBathes: integer("total_bathes").notNull().default(0),
+  fun: real("fun").notNull().default(100),
+  lastPlayedAt: timestamp("last_played_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

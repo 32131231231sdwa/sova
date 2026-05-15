@@ -129,11 +129,37 @@ function battleKeyboard(duelId: number): InlineKeyboard {
 }
 
 export function registerDuelHandlers(bot: Bot<Context>) {
-  bot.command(["дуэль", "duel"], async (ctx) => {  // "duel" already English
-    const mention = ctx.message?.reply_to_message?.from;
+  bot.command(["дуэль", "duel"], async (ctx) => {
+    // Support both: reply to a message OR @mention in command text
+    let mention = ctx.message?.reply_to_message?.from;
+
+    if (!mention) {
+      // Try to find @mention in command text: /duel @username
+      const entities = ctx.message?.entities ?? [];
+      const text = ctx.message?.text ?? "";
+      for (const entity of entities) {
+        if (entity.type === "mention") {
+          const username = text.slice(entity.offset + 1, entity.offset + entity.length);
+          // Look up user by username in DB
+          const { db, owlUsers } = await import("@workspace/db");
+          const { eq } = await import("drizzle-orm");
+          const [found] = await db.select().from(owlUsers).where(eq(owlUsers.username, username)).limit(1);
+          if (found) {
+            mention = { id: found.telegramId, username: found.username ?? undefined, first_name: found.owlName, is_bot: false, language_code: undefined } as any;
+          }
+          break;
+        }
+        if (entity.type === "text_mention" && entity.user) {
+          mention = entity.user;
+          break;
+        }
+      }
+    }
+
     if (!mention) {
       await ctx.reply(
-        `⚔️ Ответь на сообщение игрока командой <code>/дуэль</code> для вызова!`,
+        `⚔️ Ответь на сообщение игрока командой <code>/duel</code> для вызова!\n\n` +
+        `<i>Или напиши /duel @username</i>`,
         { parse_mode: "HTML" },
       );
       return;

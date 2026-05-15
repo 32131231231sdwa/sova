@@ -54,6 +54,13 @@ export function getSkin(id: string) {
 
 const BORDER = "◇ ━━━━━ ◆ ━━━━━ ◇";
 
+export function getEffectiveFun(user: OwlUser): number {
+  if (!user.lastPlayedAt) return Math.max(0, user.fun);
+  const elapsed = Date.now() - new Date(user.lastPlayedAt).getTime();
+  const decayed = (elapsed / (12 * 60 * 60 * 1000)) * 50;
+  return Math.max(0, user.fun - decayed);
+}
+
 export function formatProfile(
   user: OwlUser,
   familyName: string | null,
@@ -62,18 +69,16 @@ export function formatProfile(
   const skin = getSkin(user.owlSkin);
   const hunger = getEffectiveHunger(user);
   const thirst = getEffectiveThirst(user);
+  const fun = getEffectiveFun(user);
   const xpForNext =
     user.level < 50
       ? getLevelXP(user.level + 1) - getLevelXP(user.level)
       : 0;
   const xpProgress = user.level < 50 ? user.xp - getLevelXP(user.level) : 0;
 
-  const owlArt = skin.art.trim();
-
   const lines: string[] = [];
   lines.push(BORDER);
   lines.push(`${skin.emoji} <b>${esc(user.owlName)}</b>  <i>${esc(skin.name)}</i>`);
-  lines.push(`<code>${owlArt}</code>`);
   lines.push(`📊 Уровень: <b>${user.level}</b>`);
   if (user.level < 50) {
     lines.push(`✨ XP: <b>${xpProgress}/${xpForNext}</b>`);
@@ -83,6 +88,7 @@ export function formatProfile(
   lines.push(
     `🍗 Голод: <b>${Math.round(hunger)}%</b>  💧 Жажда: <b>${Math.round(thirst)}%</b>`,
   );
+  lines.push(`🎮 Веселье: <b>${Math.round(fun)}%</b>`);
   lines.push(`🪶 Фрагменты: <b>${user.feathers}</b>`);
   if (familyName) {
     lines.push(`👨‍👩‍👧 Семья: <i>${esc(familyName)}</i>`);

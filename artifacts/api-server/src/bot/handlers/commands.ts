@@ -15,6 +15,7 @@ import {
   formatProfile,
   getEffectiveHunger,
   getEffectiveThirst,
+  getEffectiveFun,
   progressBar,
   esc,
   getSkin,
@@ -30,6 +31,12 @@ import { eq } from "drizzle-orm";
 const FEED_COOLDOWN_MS = 30 * 60 * 1000;
 const WATER_COOLDOWN_MS = 30 * 60 * 1000;
 const BATH_COOLDOWN_MS = 60 * 60 * 1000;
+const GAME_COOLDOWN_MS = 30 * 60 * 1000;
+
+// First-use detection: lastFedAt/lastWateredAt default to createdAt on new accounts
+function isFirstUse(lastActionAt: Date | string, createdAt: Date | string): boolean {
+  return Math.abs(new Date(lastActionAt).getTime() - new Date(createdAt).getTime()) < 30_000;
+}
 
 export function registerCommands(bot: Bot<Context>) {
   bot.command("start", async (ctx) => {
@@ -60,8 +67,9 @@ export function registerCommands(bot: Bot<Context>) {
     const lastFed = new Date(user.lastFedAt).getTime();
     const now = Date.now();
     const remaining = FEED_COOLDOWN_MS - (now - lastFed);
+    const firstTime = isFirstUse(user.lastFedAt, user.createdAt);
 
-    if (remaining > 0) {
+    if (!firstTime && remaining > 0) {
       const mins = Math.ceil(remaining / 60000);
       await ctx.reply(
         `🍗 Pöllö ещё не голодна! Подожди ещё <b>${mins} мин.</b>`,
@@ -104,8 +112,9 @@ export function registerCommands(bot: Bot<Context>) {
     const lastWatered = new Date(user.lastWateredAt).getTime();
     const now = Date.now();
     const remaining = WATER_COOLDOWN_MS - (now - lastWatered);
+    const firstTime = isFirstUse(user.lastWateredAt, user.createdAt);
 
-    if (remaining > 0) {
+    if (!firstTime && remaining > 0) {
       const mins = Math.ceil(remaining / 60000);
       await ctx.reply(
         `💧 Pöllö ещё не хочет пить! Подожди ещё <b>${mins} мин.</b>`,
@@ -141,8 +150,9 @@ export function registerCommands(bot: Bot<Context>) {
     const lastBathed = user.lastBathedAt ? new Date(user.lastBathedAt).getTime() : 0;
     const now = Date.now();
     const remaining = BATH_COOLDOWN_MS - (now - lastBathed);
+    const firstTime = !user.lastBathedAt;
 
-    if (remaining > 0) {
+    if (!firstTime && remaining > 0) {
       const mins = Math.ceil(remaining / 60000);
       await ctx.reply(
         `🛁 Pöllö только что купалась! Подожди ещё <b>${mins} мин.</b>`,
@@ -183,6 +193,53 @@ export function registerCommands(bot: Bot<Context>) {
         { parse_mode: "HTML" },
       );
     }
+  });
+
+  bot.command(["играть", "game"], async (ctx) => {
+    const user = await getOrCreateUser(ctx.from!.id, ctx.from!.username);
+    const lastPlayed = user.lastPlayedAt ? new Date(user.lastPlayedAt).getTime() : 0;
+    const now = Date.now();
+    const remaining = GAME_COOLDOWN_MS - (now - lastPlayed);
+    const firstTime = !user.lastPlayedAt;
+
+    if (!firstTime && remaining > 0) {
+      const mins = Math.ceil(remaining / 60000);
+      await ctx.reply(
+        `🎮 Pöllö устала играть! Отдохнёт ещё <b>${mins} мин.</b>`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    const funGain = Math.floor(Math.random() * 20) + 20;
+    const currentFun = getEffectiveFun(user);
+    const newFun = Math.min(100, currentFun + funGain);
+    const xpGain = 5;
+
+    await updateUser(ctx.from!.id, {
+      fun: newFun,
+      lastPlayedAt: new Date(),
+    });
+    await addXP(ctx.from!.id, xpGain);
+
+    const games = [
+      "🍃 гонялась за листиком",
+      "🌰 катала желудь по полу",
+      "🧶 запуталась в клубке",
+      "🦋 охотилась за бабочкой",
+      "🪁 прыгала за веточкой",
+      "🌿 шуршала в траве",
+      "🐛 наблюдала за червяком",
+      "💨 дразнила ветер",
+    ];
+    const game = games[Math.floor(Math.random() * games.length)];
+
+    await ctx.reply(
+      `🎮 <b>${esc(user.owlName)}</b> ${game}!\n` +
+        `🎮 Веселье: ${progressBar(newFun)} (+${funGain})\n` +
+        `✨ +${xpGain} XP`,
+      { parse_mode: "HTML" },
+    );
   });
 
   bot.command(["карточки", "kartochki", "cards"], async (ctx) => {
@@ -293,26 +350,27 @@ export function registerCommands(bot: Bot<Context>) {
     await ctx.reply(
       `🦉 <b>Взрастить Pöllö — Справка</b>\n\n` +
         `<b>Основные команды:</b>\n` +
-        `/полло — профиль совы\n` +
-        `/кормить — покормить Pöllö\n` +
-        `/поить — напоить Pöllö\n` +
-        `/купать — искупать (шанс найти фрагменты)\n` +
-        `/переименовать — дать имя своей сове\n` +
-        `/карточки — твоя коллекция карточек\n\n` +
-        `<b>Игры:</b>\n` +
-        `/дуэль @игрок — вызвать на дуэль\n\n` +
+        `/profile — профиль совы\n` +
+        `/feed — покормить Pöllö\n` +
+        `/water — напоить Pöllö\n` +
+        `/bathe — искупать (шанс найти фрагменты)\n` +
+        `/game — поиграть с Pöllö (поднимает веселье)\n` +
+        `/rename ИмяСовы — дать имя своей сове\n` +
+        `/cards — твоя коллекция карточек\n\n` +
+        `<b>Дуэли:</b>\n` +
+        `/duel — ответь на сообщение игрока для вызова\n\n` +
         `<b>Магазин:</b>\n` +
-        `/магазин — купить скин\n\n` +
+        `/shop — купить скин за фрагменты 🪶\n\n` +
         `<b>Семья:</b>\n` +
-        `/семья @игрок — предложить союз\n` +
-        `/расстаться — разорвать семейный союз\n` +
-        `/вылазка — семейная вылазка\n` +
-        `/семяимя НовоеИмя — переименовать семью\n\n` +
+        `/family — ответь на сообщение для предложения союза\n` +
+        `/divorce — разорвать семейный союз\n` +
+        `/raid — семейная вылазка (кд 3 ч)\n` +
+        `/familyname НовоеИмя — переименовать семью\n\n` +
         `<b>Рейтинги:</b>\n` +
-        `/топ — таблицы лидеров\n` +
-        `/стат — (ответить на сообщение) статистика игрока\n\n` +
+        `/top — таблицы лидеров\n` +
+        `/stats — ответь на сообщение игрока для просмотра его совы\n\n` +
         `<b>Задания:</b>\n` +
-        `/задания — прогресс квестов\n\n` +
+        `/quests — прогресс квестов\n\n` +
         `💡 Карточки выпадают случайно при сообщениях (1.2% шанс)!\n` +
         `💡 Назови сову по имени — она откликнется!`,
       { parse_mode: "HTML" },
