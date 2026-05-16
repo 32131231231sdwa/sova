@@ -27,14 +27,25 @@ import {
 } from "../games.js";
 import { QUESTS } from "../data.js";
 import { db, owlUsers } from "@workspace/db";
-import { eq, ilike } from "drizzle-orm";
+import { ilike } from "drizzle-orm";
 
 const WIN_COOLDOWN_MS = 3 * 60 * 1000;
 const LOSE_COOLDOWN_MS = 10 * 60 * 1000;
+const DUEL_TIMEOUT_MS = 3 * 60 * 1000;
 
-// ── pending force-reply state ─────────────────────────────────────────────────
-// When user types /duel without a target we send ForceReply and remember the msg id
+// ── in-memory state (cleared on restart) ─────────────────────────────────────
+
+/** Waiting for user to reply with @username after /duel with no target */
 const pendingDuelPrompt = new Map<number, { promptMsgId: number; chatId: number }>();
+
+/** Waiting for user to enter stake amount via ForceReply */
+const pendingStakeInput = new Map<
+  number,
+  { duelId: number; stakeType: "feathers" | "xp"; promptMsgId: number; chatId: number }
+>();
+
+/** Timeout handles for pending duels */
+const duelTimeouts = new Map<number, ReturnType<typeof setTimeout>>();
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,6 +57,14 @@ function stakeLabel(stakeType: string, stakeAmount: number): string {
   if (stakeType === "none") return "просто так 🤝";
   if (stakeType === "feathers") return `🪶 ${stakeAmount} фрагментов`;
   return `✨ ${stakeAmount} XP`;
+}
+
+function cancelDuelTimeout(duelId: number) {
+  const id = duelTimeouts.get(duelId);
+  if (id !== undefined) {
+    clearTimeout(id);
+    duelTimeouts.delete(duelId);
+  }
 }
 
 const TYPE_NAMES: Record<string, string> = {
@@ -71,15 +90,15 @@ async function applyDuelResult(
   stakeAmount: number,
   duelType: string,
 ) {
-  const winner = await getOrCreateUser(winnerId);
   const loser = await getOrCreateUser(loserId);
+  const winner = await getOrCreateUser(winnerId);
 
   if (stakeType === "feathers" && stakeAmount > 0) {
     await removeFeathers(loserId, Math.min(stakeAmount, loser.feathers));
     await addFeathers(winnerId, stakeAmount);
   } else if (stakeType === "xp" && stakeAmount > 0) {
     await addXP(winnerId, stakeAmount);
-    await addXP(loserId, 5);
+    // loser still gets base xp below
   }
 
   await addXP(winnerId, 30);
@@ -127,34 +146,25 @@ async function applyDuelResult(
 
 function typeKeyboard(duelId: number) {
   return new InlineKeyboard()
-    .text("🪶 Игра перьев", `dtype_${duelId}_feather`)
-    .row()
-    .text("🌿 Крестики-нолики", `dtype_${duelId}_tictactoe`)
-    .row()
-    .text("🎲 Кубик удачи", `dtype_${duelId}_dice`)
-    .row()
-    .text("⚔️ Поединок", `dtype_${duelId}_battle`)
-    .row()
+    .text("🪶 Игра перьев", `dtype_${duelId}_feather`).row()
+    .text("🌿 Крестики-нолики", `dtype_${duelId}_tictactoe`).row()
+    .text("🎲 Кубик удачи", `dtype_${duelId}_dice`).row()
+    .text("⚔️ Поединок", `dtype_${duelId}_battle`).row()
     .text("❌ Отменить", `duel_cancel_${duelId}`);
 }
 
 function stakeKeyboard(duelId: number) {
   return new InlineKeyboard()
-    .text("🪶 10 фрагментов", `dstake_${duelId}_feathers_10`)
-    .text("🪶 50 фрагментов", `dstake_${duelId}_feathers_50`)
-    .row()
-    .text("✨ 30 XP", `dstake_${duelId}_xp_30`)
-    .row()
-    .text("🤝 Просто так", `dstake_${duelId}_none_0`)
-    .row()
+    .text("🪶 Фрагменты", `dstake_type_${duelId}_feathers`)
+    .text("✨ XP", `dstake_type_${duelId}_xp`).row()
+    .text("🤝 Просто так", `dstake_type_${duelId}_none`).row()
     .text("↩️ Назад", `duel_back_type_${duelId}`);
 }
 
 function acceptKeyboard(duelId: number) {
   return new InlineKeyboard()
-    .text("✅ Принять вызов!", `duel_accept_${duelId}`)
-    .row()
-    .text("❌ Отклонить", `duel_decline_${duelId}`);
+    .text("✅ Принять вызов!", `duel_accept_${duelId}`).row()
+    .text("❌ Отклонить / Отменить", `duel_decline_${duelId}`);
 }
 
 function featherKeyboard(duelId: number, state: FeatherGameState) {
@@ -182,9 +192,9 @@ function battleKeyboard(duelId: number) {
     .text("🌀 Уклониться", `battle_dodge_${duelId}`);
 }
 
-// ── core: create duel and show type-select to challenger ──────────────────────
+// ── exported: starts the duel flow (type selection) ───────────────────────────
 
-async function startDuelFlow(
+export async function startDuelFlow(
   ctx: Context,
   challengerId: number,
   challengerUsername: string | undefined,
@@ -204,7 +214,7 @@ async function startDuelFlow(
   const existingC = await getActiveDuel(challengerId);
   const existingCd = await getActiveDuel(targetId);
   if (existingC || existingCd) {
-    await ctx.reply(`⚔️ Один из игроков уже в дуэли!`);
+    await ctx.reply(`⚔️ Один из игроков уже участвует в дуэли!`);
     return;
   }
 
@@ -221,20 +231,77 @@ async function startDuelFlow(
     `🪶 <i>Игра перьев</i> — пять перьев, одно отравлено\n` +
     `🌿 <i>Крестики-нолики</i> — на коре дуба\n` +
     `🎲 <i>Кубик удачи</i> — шишка всё решит\n` +
-    `⚔️ <i>Поединок</i> — до двух ударов`,
+    `⚔️ <i>Поединок</i> — до двух попаданий`,
     { parse_mode: "HTML", reply_markup: typeKeyboard(duel.id) },
   );
 }
 
-// ── main handler ──────────────────────────────────────────────────────────────
+// ── main handler registration ─────────────────────────────────────────────────
 
 export function registerDuelHandlers(bot: Bot<Context>) {
+
+  // Schedule a timeout to cancel a pending duel after 3 minutes
+  function scheduleDuelTimeout(duelId: number, chatId: number, msgId: number) {
+    cancelDuelTimeout(duelId);
+    const id = setTimeout(async () => {
+      duelTimeouts.delete(duelId);
+      try {
+        const duel = await getDuel(duelId);
+        if (!duel || duel.state !== "pending") return;
+        await updateDuel(duelId, { state: "done" });
+        await bot.api.editMessageText(
+          chatId, msgId,
+          `⏰ <b>Время истекло!</b>\n\nСоперник не ответил за 3 минуты — вызов отменён.`,
+          { parse_mode: "HTML" },
+        );
+      } catch {}
+    }, DUEL_TIMEOUT_MS);
+    duelTimeouts.set(duelId, id);
+  }
+
+  // Helper: send the challenge message and set timeout
+  async function sendChallenge(
+    ctx: Context,
+    duelId: number,
+    stakeType: string,
+    stakeAmount: number,
+    chatId: number,
+  ) {
+    const duel = await getDuel(duelId);
+    if (!duel) return;
+    const challenger = await getOrCreateUser(duel.challengerId);
+    const challenged = await getOrCreateUser(duel.challengedId);
+    const cSkin = getSkin(challenger.owlSkin);
+    const cdSkin = getSkin(challenged.owlSkin);
+    const targetMention = challenged.username ? `@${challenged.username}` : esc(challenged.owlName);
+    const stakeStr = stakeLabel(stakeType, stakeAmount);
+
+    const sent = await ctx.reply(
+      `🌲 <b>Вызов на дуэль!</b>\n\n` +
+      `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> против ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>!\n\n` +
+      `⚔️ Тип: <b>${TYPE_NAMES[duel.duelType] ?? duel.duelType}</b>\n` +
+      `<i>${TYPE_DESCS[duel.duelType] ?? ""}</i>\n\n` +
+      `💰 Ставка: <b>${stakeStr}</b>\n` +
+      `⏰ Ответ в течение 3 минут\n\n` +
+      `${targetMention}, принимаешь вызов? 🦉`,
+      { parse_mode: "HTML", reply_markup: acceptKeyboard(duelId) },
+    );
+
+    await updateDuel(duelId, {
+      stakeType,
+      stakeAmount,
+      state: "pending",
+      messageId: sent.message_id,
+      duelExpiresAt: new Date(Date.now() + DUEL_TIMEOUT_MS),
+    });
+
+    scheduleDuelTimeout(duelId, chatId, sent.message_id);
+  }
 
   // ── /duel command ───────────────────────────────────────────────────────────
   bot.command(["дуэль", "duel"], async (ctx) => {
     const from = ctx.from!;
 
-    // 1. Try reply_to_message.from
     const replyFrom = ctx.message?.reply_to_message?.from;
     if (replyFrom && !replyFrom.is_bot && replyFrom.id !== from.id) {
       pendingDuelPrompt.delete(from.id);
@@ -242,7 +309,6 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       return;
     }
 
-    // 2. Try @mention or text_mention in command text
     const entities = ctx.message?.entities ?? [];
     const text = ctx.message?.text ?? "";
     for (const entity of entities) {
@@ -254,10 +320,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
           await startDuelFlow(ctx, from.id, from.username, found.telegramId, found.username ?? undefined, `@${username}`);
           return;
         }
-        if (!found) {
-          await ctx.reply(`❌ Игрок @${username} ещё не зарегистрирован — пусть напишет боту хотя бы раз.`);
-          return;
-        }
+        if (!found) { await ctx.reply(`❌ Игрок @${username} ещё не зарегистрирован.`); return; }
         break;
       }
       if (entity.type === "text_mention" && entity.user && entity.user.id !== from.id) {
@@ -268,82 +331,105 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       }
     }
 
-    // 3. No target found — send ForceReply prompt
     const sent = await ctx.reply(
-      `⚔️ <b>Кого вызываешь на дуэль?</b>\n\nНапиши <code>@username</code> в ответ на это сообщение:`,
-      {
-        parse_mode: "HTML",
-        reply_markup: { force_reply: true, selective: true },
-      },
+      `⚔️ <b>Кого вызываешь на дуэль?</b>\n\nНапиши <code>@username</code> в ответ:`,
+      { parse_mode: "HTML", reply_markup: { force_reply: true, selective: true } },
     );
     pendingDuelPrompt.set(from.id, { promptMsgId: sent.message_id, chatId: ctx.chat!.id });
   });
 
-  // ── catch reply to force-reply prompt ───────────────────────────────────────
+  // ── combined text handler: stake amount + opponent selection ─────────────────
   bot.on("message:text", async (ctx, next) => {
     const from = ctx.from;
     if (!from || from.is_bot) return next();
 
-    const pending = pendingDuelPrompt.get(from.id);
-    if (!pending) return next();
-
     const replyToId = ctx.message.reply_to_message?.message_id;
-    if (replyToId !== pending.promptMsgId) return next();
 
-    // This message is a reply to our ForceReply prompt
-    pendingDuelPrompt.delete(from.id);
+    // 1. Check stake amount input (takes priority)
+    const si = pendingStakeInput.get(from.id);
+    if (si && replyToId === si.promptMsgId) {
+      pendingStakeInput.delete(from.id);
 
-    const text = ctx.message.text.trim();
-    const entities = ctx.message.entities ?? [];
-
-    // Try mention entity first
-    for (const entity of entities) {
-      if (entity.type === "mention") {
-        const username = text.slice(entity.offset + 1, entity.offset + entity.length);
-        const [found] = await db.select().from(owlUsers).where(ilike(owlUsers.username, username)).limit(1);
-        if (!found) {
-          await ctx.reply(`❌ Игрок @${username} ещё не зарегистрирован — пусть напишет боту хотя бы раз.\n\nПопробуй ещё: /duel`);
-          return;
-        }
-        if (found.telegramId === from.id) {
-          await ctx.reply(`🦉 Нельзя вызвать самого себя!`);
-          return;
-        }
-        await startDuelFlow(ctx, from.id, from.username, found.telegramId, found.username ?? undefined, `@${username}`);
+      const raw = ctx.message.text.trim();
+      const amount = parseInt(raw);
+      if (isNaN(amount) || amount < 0) {
+        await ctx.reply(`❌ Введи корректное число. Попробуй снова: /duel`);
+        const duel = await getDuel(si.duelId);
+        if (duel) await updateDuel(si.duelId, { state: "done" });
         return;
       }
-      if (entity.type === "text_mention" && entity.user) {
-        const u = entity.user;
-        if (u.id === from.id) { await ctx.reply(`🦉 Нельзя вызвать самого себя!`); return; }
-        await startDuelFlow(ctx, from.id, from.username, u.id, u.username, u.username ? `@${u.username}` : u.first_name);
-        return;
-      }
-    }
 
-    // Fallback: try parsing @username from raw text
-    const match = text.match(/@(\w+)/);
-    if (match) {
-      const username = match[1]!;
-      const [found] = await db.select().from(owlUsers).where(ilike(owlUsers.username, username)).limit(1);
-      if (!found) {
-        await ctx.reply(`❌ Игрок @${username} ещё не зарегистрирован.\n\nПопробуй ещё: /duel`);
+      const duel = await getDuel(si.duelId);
+      if (!duel || duel.state !== "challenger_stake") {
+        await ctx.reply(`❌ Дуэль уже недействительна.`);
         return;
       }
-      if (found.telegramId === from.id) { await ctx.reply(`🦉 Нельзя вызвать самого себя!`); return; }
-      await startDuelFlow(ctx, from.id, from.username, found.telegramId, found.username ?? undefined, `@${username}`);
+
+      const challenger = await getOrCreateUser(from.id, from.username);
+      if (si.stakeType === "feathers" && amount > 0 && challenger.feathers < amount) {
+        await ctx.reply(`❌ У тебя только <b>${challenger.feathers}</b> фрагментов. Попробуй ещё раз: /duel`, { parse_mode: "HTML" });
+        await updateDuel(si.duelId, { state: "done" });
+        return;
+      }
+      if (si.stakeType === "xp" && amount > 0 && challenger.xp < amount) {
+        await ctx.reply(`❌ У тебя только <b>${challenger.xp}</b> XP. Попробуй ещё раз: /duel`, { parse_mode: "HTML" });
+        await updateDuel(si.duelId, { state: "done" });
+        return;
+      }
+
+      await sendChallenge(ctx, si.duelId, si.stakeType, amount, si.chatId);
       return;
     }
 
-    await ctx.reply(`❌ Не нашла @username. Напиши, например: <code>@sam</code>\n\nЕщё раз: /duel`, { parse_mode: "HTML" });
+    // 2. Check opponent selection
+    const pending = pendingDuelPrompt.get(from.id);
+    if (pending && replyToId === pending.promptMsgId) {
+      pendingDuelPrompt.delete(from.id);
+
+      const text = ctx.message.text.trim();
+      const entities = ctx.message.entities ?? [];
+
+      for (const entity of entities) {
+        if (entity.type === "mention") {
+          const username = text.slice(entity.offset + 1, entity.offset + entity.length);
+          const [found] = await db.select().from(owlUsers).where(ilike(owlUsers.username, username)).limit(1);
+          if (!found) { await ctx.reply(`❌ Игрок @${username} не найден. /duel`); return; }
+          if (found.telegramId === from.id) { await ctx.reply(`🦉 Нельзя вызвать самого себя!`); return; }
+          await startDuelFlow(ctx, from.id, from.username, found.telegramId, found.username ?? undefined, `@${username}`);
+          return;
+        }
+        if (entity.type === "text_mention" && entity.user) {
+          const u = entity.user;
+          if (u.id === from.id) { await ctx.reply(`🦉 Нельзя вызвать самого себя!`); return; }
+          await startDuelFlow(ctx, from.id, from.username, u.id, u.username, u.username ? `@${u.username}` : u.first_name);
+          return;
+        }
+      }
+
+      const match = text.match(/@(\w+)/);
+      if (match) {
+        const username = match[1]!;
+        const [found] = await db.select().from(owlUsers).where(ilike(owlUsers.username, username)).limit(1);
+        if (!found) { await ctx.reply(`❌ Игрок @${username} не найден. /duel`); return; }
+        if (found.telegramId === from.id) { await ctx.reply(`🦉 Нельзя вызвать самого себя!`); return; }
+        await startDuelFlow(ctx, from.id, from.username, found.telegramId, found.username ?? undefined, `@${username}`);
+        return;
+      }
+
+      await ctx.reply(`❌ Не нашла @username. Напиши, например: <code>@sam</code>\n\nЕщё раз: /duel`, { parse_mode: "HTML" });
+      return;
+    }
+
+    return next();
   });
 
-  // ── type selection (challenger only) ────────────────────────────────────────
+  // ── type selection ───────────────────────────────────────────────────────────
   bot.callbackQuery(/^dtype_(\d+)_(feather|tictactoe|dice|battle)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const duelType = ctx.match![2]!;
     const duel = await getDuel(duelId);
     if (!duel || duel.state !== "challenger_type") { await ctx.answerCallbackQuery("Дуэль уже неактивна"); return; }
-    if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Это твой выбор, не чужой!"); return; }
+    if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Только вызывающий выбирает тип!"); return; }
 
     await updateDuel(duelId, { duelType, state: "challenger_stake" });
     await ctx.answerCallbackQuery();
@@ -355,110 +441,121 @@ export function registerDuelHandlers(bot: Bot<Context>) {
 
     await ctx.editMessageText(
       `🌲 <b>${esc(challenger.owlName)}</b> ${cSkin.emoji} vs ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>\n\n` +
-      `Тип: <b>${TYPE_NAMES[duelType]}</b>\n` +
-      `<i>${TYPE_DESCS[duelType]}</i>\n\n` +
+      `Тип: <b>${TYPE_NAMES[duelType]}</b>\n<i>${TYPE_DESCS[duelType]}</i>\n\n` +
       `<b>На что играете?</b>`,
       { parse_mode: "HTML", reply_markup: stakeKeyboard(duelId) },
     );
   });
 
-  // back to type
+  // back to type selection
   bot.callbackQuery(/^duel_back_type_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const duel = await getDuel(duelId);
     if (!duel || duel.state !== "challenger_stake") { await ctx.answerCallbackQuery(); return; }
     if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Это не твой выбор!"); return; }
-
     await updateDuel(duelId, { state: "challenger_type" });
     await ctx.answerCallbackQuery();
-
     const challenger = await getOrCreateUser(duel.challengerId);
     const challenged = await getOrCreateUser(duel.challengedId);
     const cSkin = getSkin(challenger.owlSkin);
     const cdSkin = getSkin(challenged.owlSkin);
-
     await ctx.editMessageText(
-      `🌲 <b>${esc(challenger.owlName)}</b> ${cSkin.emoji} vs ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>\n\n` +
-      `<b>Выбери тип дуэли:</b>`,
+      `🌲 <b>${esc(challenger.owlName)}</b> ${cSkin.emoji} vs ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>\n\n<b>Выбери тип дуэли:</b>`,
       { parse_mode: "HTML", reply_markup: typeKeyboard(duelId) },
     );
   });
 
-  // ── stake selection → send challenge ────────────────────────────────────────
-  bot.callbackQuery(/^dstake_(\d+)_(feathers|xp|none)_(\d+)$/, async (ctx) => {
+  // ── stake type selection → ForceReply or direct challenge ────────────────────
+  bot.callbackQuery(/^dstake_type_(\d+)_(feathers|xp|none)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
-    const stakeType = ctx.match![2]!;
-    const stakeAmount = parseInt(ctx.match![3]!);
+    const stakeType = ctx.match![2] as "feathers" | "xp" | "none";
     const duel = await getDuel(duelId);
     if (!duel || duel.state !== "challenger_stake") { await ctx.answerCallbackQuery("Дуэль уже неактивна"); return; }
-    if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Это не твой выбор!"); return; }
+    if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Только вызывающий выбирает ставку!"); return; }
 
     const challenger = await getOrCreateUser(duel.challengerId);
-    const challenged = await getOrCreateUser(duel.challengedId);
 
-    if (stakeType === "feathers" && stakeAmount > 0 && challenger.feathers < stakeAmount) {
-      await ctx.answerCallbackQuery({ text: `У тебя только ${challenger.feathers} фрагментов!`, show_alert: true });
+    if (stakeType === "none") {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(
+        `🤝 Ставка: <b>просто так</b> — честь важнее!\n\n<i>Ищем соперника...</i>`,
+        { parse_mode: "HTML" },
+      );
+      await sendChallenge(ctx, duelId, "none", 0, duel.chatId);
       return;
     }
 
-    await updateDuel(duelId, { stakeType, stakeAmount, state: "pending" });
     await ctx.answerCallbackQuery();
 
-    const cSkin = getSkin(challenger.owlSkin);
-    const cdSkin = getSkin(challenged.owlSkin);
-    const targetMention = challenged.username ? `@${challenged.username}` : challenged.owlName;
+    const label = stakeType === "feathers"
+      ? `🪶 Сколько фрагментов ставишь?\n<i>У тебя: ${challenger.feathers}</i>\n\n0 = просто так`
+      : `✨ Сколько XP ставишь?\n<i>У тебя: ${challenger.xp} XP</i>\n\n0 = просто так`;
 
-    await ctx.editMessageText(
-      `🌲 <b>Вызов на дуэль!</b>\n\n` +
-      `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> бросает вызов ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>!\n\n` +
-      `⚔️ Тип: <b>${TYPE_NAMES[duel.duelType] ?? duel.duelType}</b>\n` +
-      `<i>${TYPE_DESCS[duel.duelType] ?? ""}</i>\n\n` +
-      `💰 Ставка: <b>${stakeLabel(stakeType, stakeAmount)}</b>\n\n` +
-      `${targetMention}, принимаешь вызов? 🦉`,
-      { parse_mode: "HTML", reply_markup: acceptKeyboard(duelId) },
-    );
+    const prompt = await ctx.reply(label, {
+      parse_mode: "HTML",
+      reply_markup: { force_reply: true, selective: true },
+    });
+
+    pendingStakeInput.set(ctx.from!.id, {
+      duelId,
+      stakeType,
+      promptMsgId: prompt.message_id,
+      chatId: duel.chatId,
+    });
   });
 
-  // ── cancel ──────────────────────────────────────────────────────────────────
+  // ── cancel ───────────────────────────────────────────────────────────────────
   bot.callbackQuery(/^duel_cancel_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const duel = await getDuel(duelId);
     if (!duel) { await ctx.answerCallbackQuery(); return; }
     if (ctx.from!.id !== duel.challengerId) { await ctx.answerCallbackQuery("Только вызывающий может отменить"); return; }
+    cancelDuelTimeout(duelId);
     await updateDuel(duelId, { state: "done" });
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(`🕊️ Вызов отменён. Совы разошлись по ветвям.`);
   });
 
-  // ── decline ─────────────────────────────────────────────────────────────────
+  // ── decline / cancel from pending ────────────────────────────────────────────
   bot.callbackQuery(/^duel_decline_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const duel = await getDuel(duelId);
     if (!duel) { await ctx.answerCallbackQuery(); return; }
-    if (ctx.from!.id !== duel.challengedId && ctx.from!.id !== duel.challengerId) {
+
+    const fromId = ctx.from!.id;
+    if (fromId !== duel.challengedId && fromId !== duel.challengerId) {
       await ctx.answerCallbackQuery("Это не твоё решение!"); return;
     }
+
+    cancelDuelTimeout(duelId);
     await updateDuel(duelId, { state: "done" });
     await ctx.answerCallbackQuery();
-    const decliner = await getOrCreateUser(ctx.from!.id);
-    await ctx.editMessageText(`🕊️ <b>${esc(decliner.owlName)}</b> отклонила вызов. Совы разошлись по ветвям.`, { parse_mode: "HTML" });
+
+    const who = await getOrCreateUser(fromId);
+    const isChallenger = fromId === duel.challengerId;
+    const action = isChallenger ? "отменила вызов" : "отклонила вызов";
+    await ctx.editMessageText(
+      `🕊️ <b>${esc(who.owlName)}</b> ${action}. Совы разошлись по ветвям.`,
+      { parse_mode: "HTML" },
+    );
   });
 
-  // ── accept → start game ──────────────────────────────────────────────────────
+  // ── accept → start game ───────────────────────────────────────────────────────
   bot.callbackQuery(/^duel_accept_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const duel = await getDuel(duelId);
     if (!duel || duel.state !== "pending") { await ctx.answerCallbackQuery("Дуэль уже недействительна"); return; }
     if (ctx.from!.id !== duel.challengedId) { await ctx.answerCallbackQuery("Это тебя не касается!"); return; }
 
-    const canCd = canDuel(await getOrCreateUser(duel.challengedId));
+    const challenged = await getOrCreateUser(duel.challengedId);
+    const canCd = canDuel(challenged);
     if (!canCd.ok) { await ctx.answerCallbackQuery({ text: canCd.reason!, show_alert: true }); return; }
 
+    cancelDuelTimeout(duelId);
     await ctx.answerCallbackQuery();
     await updateDuel(duelId, { state: "active" });
 
     const challenger = await getOrCreateUser(duel.challengerId);
-    const challenged = await getOrCreateUser(duel.challengedId);
     const cSkin = getSkin(challenger.owlSkin);
     const cdSkin = getSkin(challenged.owlSkin);
     const stakeStr = stakeLabel(duel.stakeType, duel.stakeAmount);
@@ -469,8 +566,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       const turnUser = gs.currentTurn === duel.challengerId ? challenger : challenged;
 
       await ctx.editMessageText(
-        `🪶 <b>Игра перьев!</b>\n` +
-        `<i>Пять перьев лежат на пне. Одно из них — отравлено чёрным ядом...</i>\n\n` +
+        `🪶 <b>Игра перьев!</b>\n<i>Пять перьев на пне. Одно — отравлено...</i>\n\n` +
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> vs ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>\n` +
         `💰 Ставка: <b>${stakeStr}</b>\n\n` +
         `${renderFeatherBoard(gs)}\n\n` +
@@ -484,8 +580,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       const turnUser = gs.xPlayer === duel.challengerId ? challenger : challenged;
 
       await ctx.editMessageText(
-        `🌿 <b>Крестики-нолики</b>\n` +
-        `<i>Совы нашли старый дуб и начали выцарапывать знаки когтями...</i>\n\n` +
+        `🌿 <b>Крестики-нолики</b>\n<i>Совы нашли старый дуб и выцарапывают знаки...</i>\n\n` +
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> ❌ vs ⭕ <b>${esc(challenged.owlName)}</b> ${cdSkin.emoji}\n` +
         `💰 Ставка: <b>${stakeStr}</b>\n\n` +
         `Ход: <b>${esc(turnUser.owlName)}</b>`,
@@ -500,11 +595,10 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       if (roll1 === roll2) {
         await updateDuel(duelId, { state: "done" });
         await ctx.editMessageText(
-          `🎲 <b>Кубик удачи</b>\n` +
-          `<i>Обе совы бросают шишки одновременно...</i>\n\n` +
+          `🎲 <b>Кубик удачи</b>\n\n` +
           `${cSkin.emoji} <b>${esc(challenger.owlName)}</b>: ${d[roll1]} (${roll1})\n` +
           `${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>: ${d[roll2]} (${roll2})\n\n` +
-          `🤝 <b>Ничья!</b> Шишки упали одинаково — совы разошлись с честью.`,
+          `🤝 <b>Ничья!</b> Шишки упали одинаково.`,
           { parse_mode: "HTML" },
         );
         return;
@@ -517,8 +611,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       await updateDuel(duelId, { state: "done", winnerId });
 
       await ctx.editMessageText(
-        `🎲 <b>Кубик удачи</b>\n` +
-        `<i>Совы бросают шишки — камень решает всё!</i>\n\n` +
+        `🎲 <b>Кубик удачи</b>\n\n` +
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b>: ${d[roll1]!} (${roll1})\n` +
         `${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>: ${d[roll2]!} (${roll2})\n\n` +
         `🏆 <b>${esc(winnerUser.owlName)}</b> победила!\n` +
@@ -533,8 +626,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       const turnUser = gs.currentTurn === duel.challengerId ? challenger : challenged;
 
       await ctx.editMessageText(
-        `⚔️ <b>Поединок!</b>\n` +
-        `<i>Совы встают на ветку напротив. Когти наточены, взгляды суровы...</i>\n\n` +
+        `⚔️ <b>Поединок!</b>\n<i>Совы встают напротив. Когти наточены...</i>\n\n` +
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> ${hpBar(2)} vs ${hpBar(2)} <b>${esc(challenged.owlName)}</b> ${cdSkin.emoji}\n` +
         `💰 Ставка: <b>${stakeStr}</b>\n\n` +
         `Ход: ${getSkin(turnUser.owlSkin).emoji} <b>${esc(turnUser.owlName)}</b>`,
@@ -545,17 +637,13 @@ export function registerDuelHandlers(bot: Bot<Context>) {
 
   bot.callbackQuery("noop", async (ctx) => { await ctx.answerCallbackQuery(); });
 
-  // ── feather pick ─────────────────────────────────────────────────────────────
+  // ── feather pick ──────────────────────────────────────────────────────────────
   bot.callbackQuery(/^feather_pick_(\d+)_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const index = parseInt(ctx.match![2]!);
     const duel = await getDuel(duelId);
-    if (!duel || duel.state !== "active" || duel.duelType !== "feather") {
-      await ctx.answerCallbackQuery("Дуэль недействительна"); return;
-    }
-    if (ctx.from!.id !== duel.currentTurn) {
-      await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return;
-    }
+    if (!duel || duel.state !== "active" || duel.duelType !== "feather") { await ctx.answerCallbackQuery("Дуэль недействительна"); return; }
+    if (ctx.from!.id !== duel.currentTurn) { await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return; }
     await ctx.answerCallbackQuery();
 
     const state = duel.gameState as unknown as FeatherGameState;
@@ -576,8 +664,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
       await updateDuel(duelId, { state: "done", winnerId });
 
       await ctx.editMessageText(
-        `🪶 <b>Игра перьев</b>\n\n` +
-        `${renderFeatherBoard(newState)}\n\n` +
+        `🪶 <b>Игра перьев</b>\n\n${renderFeatherBoard(newState)}\n\n` +
         `☠️ <b>${esc(loserUser.owlName)}</b> вытянула отравленное перо #${index + 1}!\n` +
         `<i>Чёрный яд — коготки подкосились...</i>\n\n` +
         `🏆 <b>${esc(winnerUser.owlName)}</b> победила!\n` +
@@ -593,7 +680,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
         `🪶 <b>Игра перьев</b>\n\n` +
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> vs ${cdSkin.emoji} <b>${esc(challenged.owlName)}</b>\n\n` +
         `${renderFeatherBoard(newState)}\n\n` +
-        `${getSkin(currentUser.owlSkin).emoji} <b>${esc(currentUser.owlName)}</b> вытянула перо #${index + 1} — чистое!\n` +
+        `${getSkin(currentUser.owlSkin).emoji} <b>${esc(currentUser.owlName)}</b> вытянула #${index + 1} — чистое!\n` +
         `<i>Выдохнула... ход переходит.</i>\n\n` +
         `Ход: ${getSkin(nextUser.owlSkin).emoji} <b>${esc(nextUser.owlName)}</b>`,
         { parse_mode: "HTML", reply_markup: featherKeyboard(duelId, newState) },
@@ -601,17 +688,13 @@ export function registerDuelHandlers(bot: Bot<Context>) {
     }
   });
 
-  // ── tic-tac-toe ──────────────────────────────────────────────────────────────
+  // ── tic-tac-toe ───────────────────────────────────────────────────────────────
   bot.callbackQuery(/^ttt_(\d+)_(\d+)$/, async (ctx) => {
     const duelId = parseInt(ctx.match![1]!);
     const index = parseInt(ctx.match![2]!);
     const duel = await getDuel(duelId);
-    if (!duel || duel.state !== "active" || duel.duelType !== "tictactoe") {
-      await ctx.answerCallbackQuery("Дуэль недействительна"); return;
-    }
-    if (ctx.from!.id !== duel.currentTurn) {
-      await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return;
-    }
+    if (!duel || duel.state !== "active" || duel.duelType !== "tictactoe") { await ctx.answerCallbackQuery("Дуэль недействительна"); return; }
+    if (ctx.from!.id !== duel.currentTurn) { await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return; }
     await ctx.answerCallbackQuery();
 
     const state = duel.gameState as unknown as TicTacToeState;
@@ -620,10 +703,10 @@ export function registerDuelHandlers(bot: Bot<Context>) {
     const cSkin = getSkin(challenger.owlSkin);
     const cdSkin = getSkin(challenged.owlSkin);
 
-    const { valid, winner, draw, state: newState } = makeTicTacToeMove(state, ctx.from!.id, index);
+    // Use nextTurn from the result — xPlayer/oPlayer are immutable role assignments
+    const { valid, winner, draw, nextTurn, state: newState } = makeTicTacToeMove(state, ctx.from!.id, index);
     if (!valid) { await ctx.answerCallbackQuery("Это место уже занято!"); return; }
 
-    const nextTurn = ctx.from!.id === newState.xPlayer ? newState.oPlayer : newState.xPlayer;
     await updateDuel(duelId, { gameState: newState as any, currentTurn: nextTurn });
 
     const boardText = `<code>${newState.board
@@ -641,7 +724,6 @@ export function registerDuelHandlers(bot: Bot<Context>) {
         `${cSkin.emoji} ${esc(challenger.owlName)} ❌ vs ⭕ ${esc(challenged.owlName)} ${cdSkin.emoji}\n\n` +
         boardText + `\n\n` +
         `🏆 <b>${esc(winnerUser.owlName)}</b> выцарапала три в ряд!\n` +
-        `<i>Победные царапины навсегда останутся на коре дуба...</i>\n` +
         (duel.stakeType !== "none" ? `💰 Приз: <b>${stakeLabel(duel.stakeType, duel.stakeAmount)}</b>\n` : ``) +
         `✨ +30 XP победителю · +10 XP проигравшему`,
         { parse_mode: "HTML" },
@@ -649,8 +731,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
     } else if (draw) {
       await updateDuel(duelId, { state: "done" });
       await ctx.editMessageText(
-        `🌿 <b>Крестики-нолики</b>\n\n` + boardText + `\n\n` +
-        `🤝 <b>Ничья!</b> Вся кора занята — ни одна сова не победила.`,
+        `🌿 <b>Крестики-нолики</b>\n\n` + boardText + `\n\n🤝 <b>Ничья!</b> Вся кора занята.`,
         { parse_mode: "HTML" },
       );
     } else {
@@ -664,17 +745,13 @@ export function registerDuelHandlers(bot: Bot<Context>) {
     }
   });
 
-  // ── battle ───────────────────────────────────────────────────────────────────
+  // ── battle ────────────────────────────────────────────────────────────────────
   bot.callbackQuery(/^battle_(attack|dodge)_(\d+)$/, async (ctx) => {
     const action = ctx.match![1] as "attack" | "dodge";
     const duelId = parseInt(ctx.match![2]!);
     const duel = await getDuel(duelId);
-    if (!duel || duel.state !== "active" || duel.duelType !== "battle") {
-      await ctx.answerCallbackQuery("Дуэль недействительна"); return;
-    }
-    if (ctx.from!.id !== duel.currentTurn) {
-      await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return;
-    }
+    if (!duel || duel.state !== "active" || duel.duelType !== "battle") { await ctx.answerCallbackQuery("Дуэль недействительна"); return; }
+    if (ctx.from!.id !== duel.currentTurn) { await ctx.answerCallbackQuery("Сейчас не твой ход! 🦉"); return; }
     await ctx.answerCallbackQuery();
 
     const state = duel.gameState as unknown as BattleState;
@@ -703,8 +780,7 @@ export function registerDuelHandlers(bot: Bot<Context>) {
         `${cSkin.emoji} <b>${esc(challenger.owlName)}</b> ${cHp}\n` +
         `${cdSkin.emoji} <b>${esc(challenged.owlName)}</b> ${cdHp}\n\n` +
         `${getSkin(currentUser.owlSkin).emoji} <b>${esc(currentUser.owlName)}</b> ${actionText} — ${result}\n\n` +
-        `🏆 <b>${esc(winnerUser.owlName)}</b> победила в поединке!\n` +
-        `<i>Победный клич разнёсся по лесу...</i>\n` +
+        `🏆 <b>${esc(winnerUser.owlName)}</b> победила!\n` +
         (duel.stakeType !== "none" ? `💰 Приз: <b>${stakeLabel(duel.stakeType, duel.stakeAmount)}</b>\n` : ``) +
         `✨ +30 XP победителю · +10 XP проигравшему`,
         { parse_mode: "HTML" },

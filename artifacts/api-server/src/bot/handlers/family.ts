@@ -4,9 +4,9 @@ import { db } from "@workspace/db";
 import {
   owlFamilies,
   owlFamilyInvites,
-  type OwlFamily,
+  owlUsers,
 } from "@workspace/db";
-import { eq, and, or } from "drizzle-orm";
+import { eq, and, or, ilike } from "drizzle-orm";
 import {
   getOrCreateUser,
   getFamily,
@@ -16,6 +16,7 @@ import {
   createFamilyInvite,
   deleteInvite,
   addFeathers,
+  removeFeathers,
   addXP,
   upsertQuestProgress,
 } from "../dbHelpers.js";
@@ -23,7 +24,7 @@ import { esc, getSkin, formatDuration } from "../format.js";
 import { QUESTS } from "../data.js";
 
 const HEIST_COOLDOWN_MS = 3 * 60 * 60 * 1000;
-const HEIST_SUCCESS_CHANCE = 0.3;
+const RAID_SUCCESS_CHANCE = 0.55;
 
 export function registerFamilyHandlers(bot: Bot<Context>) {
   bot.command(["семья", "semya", "family"], async (ctx) => {
@@ -239,7 +240,6 @@ export function registerFamilyHandlers(bot: Bot<Context>) {
       ? new Date(family.lastHeistAt).getTime()
       : 0;
     const remaining = HEIST_COOLDOWN_MS - (Date.now() - lastHeist);
-
     if (remaining > 0) {
       await ctx.reply(
         `🦉 Вылазка на перезарядке! Ещё <b>${formatDuration(remaining)}</b>`,
@@ -248,99 +248,94 @@ export function registerFamilyHandlers(bot: Bot<Context>) {
       return;
     }
 
+    // Resolve target: reply or @username in args
+    let targetUser: { telegramId: number; owlName: string; owlSkin: string; feathers: number } | null = null;
+    const replyFrom = ctx.message?.reply_to_message?.from;
+    if (replyFrom && replyFrom.id !== ctx.from!.id) {
+      targetUser = await getOrCreateUser(replyFrom.id, replyFrom.username);
+    } else {
+      const args = ctx.message?.text?.split(" ").slice(1).join(" ").trim().replace(/^@/, "");
+      if (args) {
+        const rows = await db
+          .select()
+          .from(owlUsers)
+          .where(ilike(owlUsers.username, args))
+          .limit(1);
+        targetUser = rows[0] ?? null;
+      }
+    }
+
+    if (!targetUser) {
+      await ctx.reply(
+        `🦅 <b>Вылазка — налёт на чужое гнездо!</b>\n\n` +
+          `Ответь на сообщение игрока или укажи имя:\n` +
+          `<code>/вылазка @username</code>`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    if (targetUser.telegramId === family.user1Id || targetUser.telegramId === family.user2Id) {
+      await ctx.reply(`❌ Нельзя грабить своего партнёра по гнезду!`);
+      return;
+    }
+
     const [u1, u2] = await getFamilyUsers(family);
-    const keyboard = new InlineKeyboard()
-      .text("🪶 Украсть фрагмент", `heist_feather_${family.id}`)
-      .text("✨ Бонусный опыт", `heist_xp_${family.id}`);
+    const targetSkin = getSkin(targetUser.owlSkin);
 
-    await ctx.reply(
-      `🦉🦉 <b>Семейная вылазка</b>\n\n` +
-        `<b>${esc(u1.owlName)}</b> + <b>${esc(u2.owlName)}</b> готовятся к охоте!\n\n` +
-        `Что стащить?`,
-      { parse_mode: "HTML", reply_markup: keyboard },
-    );
-  });
-
-  bot.callbackQuery(/^heist_(feather|xp)_(\d+)$/, async (ctx) => {
-    const heistType = ctx.match![1] as "feather" | "xp";
-    const familyId = parseInt(ctx.match![2]!);
-
-    const famRows = await db
-      .select()
-      .from(owlFamilies)
-      .where(eq(owlFamilies.id, familyId))
-      .limit(1);
-    const fam = famRows[0];
-
-    if (!fam) {
-      await ctx.answerCallbackQuery("❌ Семья не найдена");
-      await ctx.editMessageText("❌ Семья не найдена");
-      return;
-    }
-
-    if (ctx.from!.id !== fam.user1Id && ctx.from!.id !== fam.user2Id) {
-      await ctx.answerCallbackQuery("Это не твоя семья!");
-      return;
-    }
-
-    const lastHeist = fam.lastHeistAt
-      ? new Date(fam.lastHeistAt).getTime()
-      : 0;
-    if (HEIST_COOLDOWN_MS - (Date.now() - lastHeist) > 0) {
-      await ctx.answerCallbackQuery("⏰ Вылазка уже на перезарядке!");
-      return;
-    }
-
-    const success = Math.random() < HEIST_SUCCESS_CHANCE;
-
+    // Set cooldown immediately to prevent double-raid
     await db
       .update(owlFamilies)
       .set({ lastHeistAt: new Date() })
-      .where(eq(owlFamilies.id, familyId));
+      .where(eq(owlFamilies.id, family.id));
 
     const xpGain = 15;
-    await addXP(fam.user1Id, xpGain);
-    await addXP(fam.user2Id, xpGain);
+    await addXP(family.user1Id, xpGain);
+    await addXP(family.user2Id, xpGain);
 
     const questIds = ["l27_heist_3", "l41_heist_10"];
     for (const qid of questIds) {
       const quest = QUESTS.find((q) => q.id === qid);
       if (quest) {
-        await upsertQuestProgress(fam.user1Id, qid, quest.target, 1);
-        await upsertQuestProgress(fam.user2Id, qid, quest.target, 1);
+        await upsertQuestProgress(family.user1Id, qid, quest.target, 1);
+        await upsertQuestProgress(family.user2Id, qid, quest.target, 1);
       }
     }
 
-    const [u1, u2] = await getFamilyUsers(fam);
-    await ctx.answerCallbackQuery();
+    // Check target feathers — no point raiding an empty nest
+    if (targetUser.feathers <= 0) {
+      await ctx.reply(
+        `💨 <b>Вылазка: пустое гнездо!</b>\n\n` +
+          `${targetSkin.emoji} <b>${esc(targetUser.owlName)}</b> ничего не припасла — лапы пустые!\n\n` +
+          `✨ +${xpGain} XP каждой (хоть что-то)`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    const success = Math.random() < RAID_SUCCESS_CHANCE;
 
     if (success) {
-      if (heistType === "feather") {
-        await addFeathers(fam.user1Id, 1);
-        await addFeathers(fam.user2Id, 1);
-        await ctx.editMessageText(
-          `🎉 <b>Вылазка удалась!</b>\n\n` +
-            `${getSkin(u1.owlSkin).emoji} <b>${esc(u1.owlName)}</b> отвлекала, пока\n` +
-            `${getSkin(u2.owlSkin).emoji} <b>${esc(u2.owlName)}</b> тащила добычу!\n\n` +
-            `🪶 Каждой +1 фрагмент\n` +
-            `✨ +${xpGain} XP каждой`,
-          { parse_mode: "HTML" },
-        );
-      } else {
-        await addXP(fam.user1Id, 25);
-        await addXP(fam.user2Id, 25);
-        await ctx.editMessageText(
-          `🎉 <b>Вылазка удалась!</b>\n\n` +
-            `Совы тайно подслушали мудрость лесного старца!\n\n` +
-            `✨ +25 бонусного XP каждой\n` +
-            `✨ +${xpGain} XP за вылазку`,
-          { parse_mode: "HTML" },
-        );
-      }
+      // Steal 15–30% of target's feathers, min 1, max 20
+      const stolen = Math.max(1, Math.min(20, Math.floor(targetUser.feathers * (0.15 + Math.random() * 0.15))));
+      await removeFeathers(targetUser.telegramId, stolen);
+      const perOwl = Math.max(1, Math.floor(stolen / 2));
+      await addFeathers(family.user1Id, perOwl);
+      await addFeathers(family.user2Id, perOwl);
+
+      await ctx.reply(
+        `🎉 <b>Вылазка удалась!</b>\n\n` +
+          `${getSkin(u1.owlSkin).emoji} <b>${esc(u1.owlName)}</b> отвлекала, пока\n` +
+          `${getSkin(u2.owlSkin).emoji} <b>${esc(u2.owlName)}</b> потрошила запасы\n` +
+          `${targetSkin.emoji} <b>${esc(targetUser.owlName)}</b>!\n\n` +
+          `🪶 Стащили <b>${stolen}</b> фрагментов — по ${perOwl} каждой\n` +
+          `✨ +${xpGain} XP каждой`,
+        { parse_mode: "HTML" },
+      );
     } else {
-      await ctx.editMessageText(
+      await ctx.reply(
         `💨 <b>Вылазка провалилась!</b>\n\n` +
-          `Совы засветились и были прогнаны. Стыдоба!\n\n` +
+          `${targetSkin.emoji} <b>${esc(targetUser.owlName)}</b> почуяла слежку и спугнула воришек!\n\n` +
           `✨ +${xpGain} XP каждой (зато опыт!)`,
         { parse_mode: "HTML" },
       );

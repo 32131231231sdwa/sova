@@ -19,10 +19,13 @@ export const owlUsers = pgTable("owl_users", {
   xp: integer("xp").notNull().default(0),
   hunger: real("hunger").notNull().default(100),
   thirst: real("thirst").notNull().default(100),
+  vigor: real("vigor").notNull().default(100),
   feathers: integer("feathers").notNull().default(0),
   lastFedAt: timestamp("last_fed_at").notNull().defaultNow(),
   lastWateredAt: timestamp("last_watered_at").notNull().defaultNow(),
   lastBathedAt: timestamp("last_bathed_at"),
+  lastSleptAt: timestamp("last_slept_at"),
+  lastPlayedAt: timestamp("last_played_at"),
   duelWinCooldown: timestamp("duel_win_cooldown"),
   duelLoseCooldown: timestamp("duel_lose_cooldown"),
   messageCount: integer("message_count").notNull().default(0),
@@ -34,7 +37,6 @@ export const owlUsers = pgTable("owl_users", {
   totalDuelsLost: integer("total_duels_lost").notNull().default(0),
   totalBathes: integer("total_bathes").notNull().default(0),
   fun: real("fun").notNull().default(100),
-  lastPlayedAt: timestamp("last_played_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -72,11 +74,13 @@ export const owlDuels = pgTable("owl_duels", {
   duelType: text("duel_type").notNull().default("pending"),
   stakeType: text("stake_type").notNull().default("none"),
   stakeAmount: integer("stake_amount").notNull().default(0),
+  stakeXp: integer("stake_xp").notNull().default(0),
   state: text("state").notNull().default("pending"),
   gameState: jsonb("game_state"),
   currentTurn: bigint("current_turn", { mode: "number" }),
   winnerId: bigint("winner_id", { mode: "number" }),
   messageId: integer("message_id"),
+  duelExpiresAt: timestamp("duel_expires_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
