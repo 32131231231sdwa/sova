@@ -1,0 +1,1 @@
+{"build":{"cmd":"pnpm install && pnpm run build"},"deploy":{"startCmd":"pnpm --filter @workspace/api-server run start"}} 
